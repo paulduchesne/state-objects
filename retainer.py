@@ -1,16 +1,14 @@
-
-# script for safe storage of unique digital objects.
-
-import datetime
+from cryptography.fernet import Fernet
+import base64
 import hashlib
 import json
-import pandas
 import pathlib
-import shutil
+import rdflib
+import uuid
 
 def checksummer(file_path):
 
-    ''' Default MD5 checksumming function. '''
+    ''' Boring MD5 checksumming function. '''
 
     with open(file_path, 'rb') as item:
         hash = hashlib.md5()
@@ -19,83 +17,69 @@ def checksummer(file_path):
         checksum = hash.hexdigest().lower()
         return(checksum)
 
-def hash_extract(row, commence):
+def file_graph(file_path):
 
-    ''' Process hash extract with expected processing time. '''
+    ''' Convert incoming file into private graph. '''
 
-    status = (datetime.datetime.now()-commence)/(row.name+1)
-    time_to_finish = (((status)*(len(dataframe)))+commence)
-    time_to_finish = time_to_finish.strftime("%Y-%m-%d %H:%M:%S")
-    print(f'hashing: {row.name+1} of {len(dataframe)}; eta {time_to_finish}.')
-    return checksummer(row['FILE'])
+    if not file_path.exists():
+        raise Exception('File does not exist in expected location.')
 
+    with open(file_path, 'rb') as file_data:
+        file_data = file_data.read()
 
-def check_file(row, commence):
+    file_uuid = str(uuid.uuid4())
+    file_base64 = base64.b64encode(file_data).decode('utf-8')
+    file_hash = checksummer(file_path)
 
-    ''' Check file existence and rehash matches. '''
+    graph = rdflib.Graph()
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.RDF.type, rdflib.URIRef('paul://ontology/file')))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filename'), rdflib.Literal(file_path)))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filesize'), rdflib.Literal(file_path.stat().st_size)))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filedata'), rdflib.Literal(file_base64)))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filehash'), rdflib.Literal(file_hash)))
 
-    status = (datetime.datetime.now()-commence)/(row.name+1)
-    time_to_finish = (((status)*(len(dataframe)))+commence)
-    time_to_finish = time_to_finish.strftime("%Y-%m-%d %H:%M:%S")
-    print(f'checking: {row.name+1} of {len(dataframe)}; eta {time_to_finish}.')
+    return graph
 
-    file_ext = pathlib.Path(row['FILE']).suffix
-    full_hash = row['HASH']
-    hash_prefix = str(row['HASH'])[:2]
-    predicted_file = out_dir / 'object' / hash_prefix / f'{full_hash}{file_ext}'
-    if not pathlib.Path(predicted_file).exists():
-        raise Exception(predicted_file, 'does not exist.')
-    if full_hash != checksummer(predicted_file):
-        raise Exception(predicted_file, 'hash not as expected.')
-    return predicted_file    
+def write_statements(graph):
 
-# load config with defined source and target locations.
+    ''' Convert private graph into public instance. '''
 
-with open(pathlib.Path.cwd() / 'config.json') as config:
-    config = json.load(config)
-    in_dir = pathlib.Path(config['input_directory'])
-    out_dir = pathlib.Path(config['output_directory'])
+    key_dict = dict()
 
-# check locations are mounted and/or accessible.
+    for s,p,o in graph.triples((None, None, None)):
 
-for x in [in_dir, out_dir]:
-    if not x.exists():
-        raise Exception(str(x), 'does not exist.')
+        statement_uuid = str(uuid.uuid4())
+        statement_uri = rdflib.URIRef('web://'+statement_uuid)
+        statement = rdflib.Graph().add((s, p, o)).serialize(format='nt')
 
-# hash file list of target files.
+        key = str(uuid.uuid4()).replace('-', '')
+        fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
 
-file_list = [x for x in in_dir.glob('**/*') if x.is_file() == True]
-dataframe = pandas.DataFrame(file_list, columns=['FILE'])
-dataframe['HASH'] = dataframe.apply(hash_extract, commence=datetime.datetime.now(), axis=1)
+        public_graph = rdflib.Graph()
+        public_graph.add((statement_uri, rdflib.RDF.type, rdflib.URIRef('state://ontology/statement')))
+ 
+        state_literal = rdflib.Literal(fernet.encrypt(statement.encode()).decode())
+        public_graph.add((statement_uri, rdflib.URIRef('state://ontology/content'), state_literal))
 
-# copy to drive if file does not exist.
+        graph_path = pathlib.Path.cwd() / 'turtle' / statement_uuid[:2] / f'{statement_uuid}.ttl'
+        graph_path.parents[0].mkdir(exist_ok=True, parents=True)
+        public_graph.serialize(destination=str(graph_path), format='turtle')
 
-if out_dir.exists():
-    commence = datetime.datetime.now()
-    for x in range(len(dataframe)):
-        status = (datetime.datetime.now()-commence)/(x+1)
-        time_to_finish = (((status)*(len(dataframe)))+commence)
-        time_to_finish = time_to_finish.strftime("%Y-%m-%d %H:%M:%S")
-        print(f'copying: {x+1} of {len(dataframe)}; eta {time_to_finish}.')
+        key_dict[statement_uuid] = key
 
-        item = dataframe.iloc[x]
-        file = pathlib.Path(item['FILE'])
-        hash = item['HASH']
-        new_path = out_dir / 'object' / hash[:2] / f'{hash}{file.suffix}'
-        new_path.parents[0].mkdir(exist_ok=True, parents=True)
-        if not new_path.exists():
-            shutil.copyfile(file, new_path)
+    return key_dict
 
-# check files exist on target location and hash matches.
+# convert source to public triples.
 
-dataframe['SAFE'] = dataframe.apply(check_file, commence=datetime.datetime.now(), axis=1)
+test_file = pathlib.Path.cwd() / 'image.jpg'
+private_graph = file_graph(test_file)
+private_keys = write_statements(private_graph)
 
-# write manifest report out.
+# unencryption keys. keep safe.
 
-timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-manifest_path = pathlib.Path(out_dir / 'manifest' / f'{timestamp}.csv')
-manifest_path.parents[0].mkdir(exist_ok=True)
-dataframe.to_csv(manifest_path, index='False')
+print(json.dumps(private_keys, indent=4))
 
-print(len(dataframe))
-print(len(dataframe.HASH.unique()))
+# mission then is to reverse this process.
+
+# ...
+

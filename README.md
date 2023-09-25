@@ -1,2 +1,2 @@
 # Retainer
-personal storage
+Personal storage mechanism via State.
