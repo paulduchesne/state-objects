@@ -69,6 +69,16 @@ def write_statements(graph):
 
     return key_dict
 
+def pull_predicate(graph, subj, pred):
+
+    ''' Pull single statement by predicate from graph. '''
+
+    obj = [c for a,b,c in graph.triples((subj, pred, None))]
+    if len(obj) != 1:
+        raise Exception('Multiple statements should not be possible.')
+
+    return obj
+
 # convert source to public triples.
 
 test_file = pathlib.Path.cwd() / 'image.jpg'
@@ -77,9 +87,43 @@ private_keys = write_statements(private_graph)
 
 # unencryption keys. keep safe.
 
-print(json.dumps(private_keys, indent=4))
+# print(json.dumps(private_keys, indent=4))
 
 # mission then is to reverse this process.
 
 # ...
 
+# build the public graph.
+
+public_graph = rdflib.Graph()
+public_triples = [x for x in (pathlib.Path.cwd() / 'turtle').rglob('*') if x.suffix == '.ttl']
+for x in public_triples:
+    public_graph += rdflib.Graph().parse(x)
+
+# build the private graph.
+
+private_graph = rdflib.Graph()
+for s,p,o in public_graph.triples((None, rdflib.RDF.type, rdflib.URIRef('state://ontology/statement'))):
+    for a,b,c in public_graph.triples((s, rdflib.URIRef('state://ontology/content'), None)):
+       if pathlib.Path(a).name in private_keys:
+            key = private_keys[pathlib.Path(a).name]
+            fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
+            private_statement = fernet.decrypt(c.encode()).decode()
+            private_graph += rdflib.Graph().parse(data=private_statement)
+
+# extract files back to disk.
+
+for s,p,o in private_graph.triples((None, rdflib.RDF.type, rdflib.URIRef('paul://ontology/file'))):
+
+    filename = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filename'))
+    filehash = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filehash'))
+    filedata = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filedata'))
+
+    without_path = pathlib.Path(filename[0]).name
+    output_path = pathlib.Path.cwd() / 'recreated' / without_path
+    with open(output_path, 'wb') as output:
+        output.write(base64.decodebytes(filedata[0].encode('utf-8')))
+
+    test = checksummer(output_path)
+    if test != str(filehash[0]):
+        raise Exception('Hash does not match.')
