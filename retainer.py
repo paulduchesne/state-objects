@@ -87,11 +87,18 @@ private_keys = write_statements(private_graph)
 
 # unencryption keys. keep safe.
 
-# print(json.dumps(private_keys, indent=4))
+keys_path = pathlib.Path.cwd() / 'keys.json'
+if not keys_path.exists():
+    with open(keys_path, 'w') as keys_out:
+        json.dump(private_keys, keys_out, indent=4)
+else:
+    with open(keys_path) as keys_in:
+        keys_in = json.load(keys_in)
+    
+    with open(keys_path, 'w') as keys_out:
+        json.dump(keys_in | private_keys, keys_out, indent=4)
 
-# mission then is to reverse this process.
-
-# ...
+# # mission then is to reverse this process.
 
 # build the public graph.
 
