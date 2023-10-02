@@ -80,62 +80,93 @@ def pull_predicate(graph, subj, pred):
 
     return obj
 
-# convert incoming media to public triples.
+def contribute_files(directory):
 
-incoming_directory = pathlib.Path.home() / 'media'
-incoming_files = [x for x in incoming_directory.rglob('*') if x.is_file() == True]
+    ''' Pass in a local directory containing files to contribute. '''
 
-for f in tqdm.tqdm(incoming_files):
+    # convert incoming media to public triples.
 
-    private_graph = file_graph(f)
-    private_keys = write_statements(private_graph)
+    incoming_files = [x for x in directory.rglob('*') if x.is_file() == True]
 
-# unencryption keys. keep safe.
+    for f in tqdm.tqdm(incoming_files):
 
-keys_path = pathlib.Path.cwd() / 'keys.json'
-if not keys_path.exists():
-    with open(keys_path, 'w') as keys_out:
-        json.dump(private_keys, keys_out, indent=4)
-else:
-    with open(keys_path) as keys_in:
-        keys_in = json.load(keys_in)
+        private_graph = file_graph(f)
+        private_keys = write_statements(private_graph)
+
+        # unencryption keys. keep safe.
+
+        keys_path = pathlib.Path.cwd() / 'keys.json'
+        if not keys_path.exists():
+            with open(keys_path, 'w') as keys_out:
+                json.dump(private_keys, keys_out, indent=4)
+        else:
+            with open(keys_path) as keys_in:
+                keys_in = json.load(keys_in)
+            
+            with open(keys_path, 'w') as keys_out:
+                json.dump(keys_in | private_keys, keys_out, indent=4)
+
+def recreate_files(directory):
+
+    ''' 
     
-    with open(keys_path, 'w') as keys_out:
-        json.dump(keys_in | private_keys, keys_out, indent=4)
+    Explicitly regenerate files from existing graph. 
+    
+    This currently has understandable problems holding the entire graph in memory,
+    which would only get worse with GBs of data. Solution A) is to generate the map,
+    which lists all nodes and can be used to pull URIs on all files or B) run an
+    initial pass to pull all URIs which apply to files.
+    
+    '''
 
-# # mission then is to reverse this process.
+    # build the public graph.
 
-# # build the public graph.
+    public_graph = rdflib.Graph()   
+    public_triples = [x for x in (pathlib.Path.cwd() / 'turtle').rglob('*') if x.suffix == '.ttl']
+    for x in public_triples:
+        public_graph += rdflib.Graph().parse(x)
 
-# public_graph = rdflib.Graph()
-# public_triples = [x for x in (pathlib.Path.cwd() / 'turtle').rglob('*') if x.suffix == '.ttl']
-# for x in public_triples:
-#     public_graph += rdflib.Graph().parse(x)
+    # grab the private keys.
+    
+    private_keypath = pathlib.Path.cwd() / 'keys.json'
+    if not private_keypath.exists():
+        raise Exception('Keys could not be found.')
+    else:
+        with open(private_keypath) as private_keys:
+            private_keys = json.load(private_keys)
 
-# # build the private graph.
+    # build the private graph.
 
-# private_graph = rdflib.Graph()
-# for s,p,o in public_graph.triples((None, rdflib.RDF.type, rdflib.URIRef('state://ontology/statement'))):
-#     for a,b,c in public_graph.triples((s, rdflib.URIRef('state://ontology/content'), None)):
-#        if pathlib.Path(a).name in private_keys:
-#             key = private_keys[pathlib.Path(a).name]
-#             fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
-#             private_statement = fernet.decrypt(c.encode()).decode()
-#             private_graph += rdflib.Graph().parse(data=private_statement)
+    private_graph = rdflib.Graph()
+    for s,p,o in public_graph.triples((None, rdflib.RDF.type, rdflib.URIRef('state://ontology/statement'))):
+        for a,b,c in public_graph.triples((s, rdflib.URIRef('state://ontology/content'), None)):
+            if pathlib.Path(a).name in private_keys:
+                key = private_keys[pathlib.Path(a).name]
+                fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
+                private_statement = fernet.decrypt(c.encode()).decode()
+                private_graph += rdflib.Graph().parse(data=private_statement)
 
-# # extract files back to disk.
+    # extract files back to disk.
 
-# for s,p,o in private_graph.triples((None, rdflib.RDF.type, rdflib.URIRef('paul://ontology/file'))):
+    for s,p,o in private_graph.triples((None, rdflib.RDF.type, rdflib.URIRef('paul://ontology/file'))):
 
-#     filename = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filename'))
-#     filehash = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filehash'))
-#     filedata = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filedata'))
+        filename = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filename'))
+        filehash = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filehash'))
+        filedata = pull_predicate(private_graph, s, rdflib.URIRef('paul://ontology/filedata'))
 
-#     without_path = pathlib.Path(filename[0]).name
-#     output_path = pathlib.Path.cwd() / 'recreated' / without_path
-#     with open(output_path, 'wb') as output:
-#         output.write(base64.decodebytes(filedata[0].encode('utf-8')))
+        without_path = pathlib.Path(filename[0]).name
+        output_path = pathlib.Path.cwd() / 'recreate' / without_path
+        output_path.parents[0].mkdir(exist_ok=True)
+        with open(output_path, 'wb') as output:
+            output.write(base64.decodebytes(filedata[0].encode('utf-8')))
 
-#     test = checksummer(output_path)
-#     if test != str(filehash[0]):
-#         raise Exception('Hash does not match.')
+        test = checksummer(output_path)
+        if test != str(filehash[0]):
+            raise Exception('Hash does not match.')
+
+# # add files to public graph.
+# contribute_files(pathlib.Path.home() / 'media')
+
+# # pull files from public graph.
+# recreate_files(pathlib.Path.cwd() / 'recreate')
+
