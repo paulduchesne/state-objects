@@ -107,36 +107,23 @@ def contribute_files(directory):
             with open(keys_path, 'w') as keys_out:
                 json.dump(keys_in | private_keys, keys_out, indent=4)
 
+def file_attributes(df, subj, pred):
 
-def file_attributes(df, subj, pred, ext_keys):
+    ''' Pull specific attribute about an entity and return object. '''
 
     filename = df.loc[df.subject.isin([subj]) & df.predicate.isin([pred])]
     if len(filename) != 1:
-        raise Exception('Expected one response.')
+        raise Exception('Expected exactly one response.')
 
     state_stub = filename.reset_index().at[0, 'source']
-    state_file = pathlib.Path(state_stub).name
-    # print(state_stub, pathlib.Path(state_stub).name)
+    state_id = pathlib.Path(state_stub).name
+    res_triple = pull_triple(state_id)
+    for a,b,c in res_triple.triples((None, None, None)):         
+        return c
 
-    state_path = pathlib.Path.cwd() / 'turtle' / state_file[:2] / f'{state_file}.ttl'
+def pull_triple(statement_id):
 
-    # this is pulled verbatim out of the above and so should probably be a function.
-
-    public_statememt = rdflib.Graph().parse(state_path)
-    for s,p,o in public_statememt:
-        if p == rdflib.URIRef('state://ontology/content'):
-            if pathlib.Path(s).name in ext_keys:
-                key = ext_keys[pathlib.Path(s).name]
-                fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
-                private_statement = fernet.decrypt(o.encode()).decode()
-                private_graph = rdflib.Graph().parse(data=private_statement)
-                for a,b,c in private_graph.triples((None, None, None)):
-                    
-                    return c
-
-def recreate_files(directory):
-
-    ''' Regenerate files from existing graph. '''
+    ''' Retrieve triple against provided state id. '''
 
     private_keypath = pathlib.Path.cwd() / 'private.json'
     if not private_keypath.exists():
@@ -145,39 +132,47 @@ def recreate_files(directory):
         with open(private_keypath) as private_keys:
             private_keys = json.load(private_keys)
 
+    statement_path = pathlib.Path.cwd() / 'turtle' / statement_id[:2] / f'{statement_id}.ttl'
+    public_statememt = rdflib.Graph().parse(statement_path)
+    for s,p,o in public_statememt:
+        if p == rdflib.URIRef('state://ontology/content'):
+            if pathlib.Path(s).name in private_keys:
+                key = private_keys[pathlib.Path(s).name]
+                fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
+                private_statement = fernet.decrypt(o.encode()).decode()
+                private_graph = rdflib.Graph().parse(data=private_statement)
+
+    if len(private_graph) == 1:
+        return private_graph
+    else:
+        return Exception('Statement not retrieved.')
+
+def recreate_files(directory):
+
+    ''' Regenerate files from existing graph. '''
+
     # build a map of the private graph. this is currently being performed on-the-fly, 
     # but an alternate model would be that a local copy exists to be consulted.
 
     map_df = pandas.DataFrame(columns=['source', 'subject', 'predicate', 'object'])
-    public_triples = [x for x in (pathlib.Path.cwd() / 'turtle').rglob('*') if x.suffix == '.ttl']
-    for x in public_triples:
-        public_statememt = rdflib.Graph().parse(x)
-        for s,p,o in public_statememt:
-            if p == rdflib.URIRef('state://ontology/content'):
-                if pathlib.Path(s).name in private_keys:
-                    key = private_keys[pathlib.Path(s).name]
-                    fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
-                    private_statement = fernet.decrypt(o.encode()).decode()
-                    private_graph = rdflib.Graph().parse(data=private_statement)
-                    for a,b,c in private_graph.triples((None, None, None)):
-                        if type(c) == type(rdflib.URIRef('')):
-                            map_df.loc[len(map_df)] = [(s),(a), (b), (c)]
-                        elif type(c) == type(rdflib.Literal('')):
-                            map_df.loc[len(map_df)] = [(s),(a), (b), (rdflib.Literal(''))]
-                        else:
-                            raise Exception('Unknown object type.')
- 
+    public_statements = [x.stem for x in (pathlib.Path.cwd() / 'turtle').rglob('*') if x.suffix == '.ttl']
+    for x in public_statements:
+
+        res_triple = pull_triple(x)
+
+        for a,b,c in res_triple.triples((None, None, None)):
+            if type(c) == type(rdflib.URIRef('')):
+                map_df.loc[len(map_df)] = [(x),(a), (b), (c)]
+            elif type(c) == type(rdflib.Literal('')):
+                map_df.loc[len(map_df)] = [(x),(a), (b), (rdflib.Literal(''))]
+            else:
+                raise Exception('Unknown object type.')
+
     file_list = map_df.loc[map_df.object.isin([rdflib.URIRef('paul://ontology/file')])]
-
     for f in file_list.subject.unique():
-        print('this is a file to restore', f)
-
-        filename = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filename'), private_keys)
-        print(filename)
-        filehash = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filehash'), private_keys)
-        print(filehash)
-        filedata = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filedata'), private_keys)
-        print(len(filedata))
+        filename = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filename'))
+        filehash = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filehash'))
+        filedata = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filedata'))
 
         without_path = pathlib.Path(filename).name
         output_path = pathlib.Path.home() / 'recreated_media' / without_path
@@ -189,9 +184,7 @@ def recreate_files(directory):
         if test != str(filehash):
             raise Exception('Hash does not match.')
 
-# # add files to public graph.
-# contribute_files(pathlib.Path.home() / 'media')
+# contribute_files(pathlib.Path.home() / 'media') # add files to public graph.
 
-# pull files from public graph.
-recreate_files(pathlib.Path.cwd() / 'recreate')
+recreate_files(pathlib.Path.cwd() / 'recreate') # pull files from public graph.
 
