@@ -1,16 +1,16 @@
-
-# script for safe storage of unique digital objects.
-
-import datetime
+from cryptography.fernet import Fernet
+import base64
 import hashlib
 import json
 import pandas
 import pathlib
-import shutil
+import rdflib
+import tqdm
+import uuid
 
 def checksummer(file_path):
 
-    ''' Default MD5 checksumming function. '''
+    ''' Boring MD5 checksumming function. '''
 
     with open(file_path, 'rb') as item:
         hash = hashlib.md5()
@@ -19,83 +19,172 @@ def checksummer(file_path):
         checksum = hash.hexdigest().lower()
         return(checksum)
 
-def hash_extract(row, commence):
+def file_graph(file_path):
 
-    ''' Process hash extract with expected processing time. '''
+    ''' Convert incoming file into private graph. '''
 
-    status = (datetime.datetime.now()-commence)/(row.name+1)
-    time_to_finish = (((status)*(len(dataframe)))+commence)
-    time_to_finish = time_to_finish.strftime("%Y-%m-%d %H:%M:%S")
-    print(f'hashing: {row.name+1} of {len(dataframe)}; eta {time_to_finish}.')
-    return checksummer(row['FILE'])
+    if not file_path.exists():
+        raise Exception('File does not exist in expected location.')
 
+    with open(file_path, 'rb') as file_data:
+        file_data = file_data.read()
 
-def check_file(row, commence):
+    file_uuid = str(uuid.uuid4())
+    file_base64 = base64.b64encode(file_data).decode('utf-8')
+    file_hash = checksummer(file_path)
 
-    ''' Check file existence and rehash matches. '''
+    graph = rdflib.Graph()
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.RDF.type, rdflib.URIRef('paul://ontology/file')))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filename'), rdflib.Literal(file_path)))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filesize'), rdflib.Literal(file_path.stat().st_size)))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filedata'), rdflib.Literal(file_base64)))
+    graph.add((rdflib.URIRef(f'paul://resource/{file_uuid}'), rdflib.URIRef('paul://ontology/filehash'), rdflib.Literal(file_hash)))
 
-    status = (datetime.datetime.now()-commence)/(row.name+1)
-    time_to_finish = (((status)*(len(dataframe)))+commence)
-    time_to_finish = time_to_finish.strftime("%Y-%m-%d %H:%M:%S")
-    print(f'checking: {row.name+1} of {len(dataframe)}; eta {time_to_finish}.')
+    return graph
 
-    file_ext = pathlib.Path(row['FILE']).suffix
-    full_hash = row['HASH']
-    hash_prefix = str(row['HASH'])[:2]
-    predicted_file = out_dir / 'object' / hash_prefix / f'{full_hash}{file_ext}'
-    if not pathlib.Path(predicted_file).exists():
-        raise Exception(predicted_file, 'does not exist.')
-    if full_hash != checksummer(predicted_file):
-        raise Exception(predicted_file, 'hash not as expected.')
-    return predicted_file    
+def write_statements(graph):
 
-# load config with defined source and target locations.
+    ''' Convert private graph into public instance. '''
 
-with open(pathlib.Path.cwd() / 'config.json') as config:
-    config = json.load(config)
-    in_dir = pathlib.Path(config['input_directory'])
-    out_dir = pathlib.Path(config['output_directory'])
+    key_dict = dict()
 
-# check locations are mounted and/or accessible.
+    for s,p,o in graph.triples((None, None, None)):
 
-for x in [in_dir, out_dir]:
-    if not x.exists():
-        raise Exception(str(x), 'does not exist.')
+        statement_uuid = str(uuid.uuid4())
+        statement_uri = rdflib.URIRef('web://'+statement_uuid)
+        statement = rdflib.Graph().add((s, p, o)).serialize(format='nt')
 
-# hash file list of target files.
+        key = str(uuid.uuid4()).replace('-', '')
+        fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
 
-file_list = [x for x in in_dir.glob('**/*') if x.is_file() == True]
-dataframe = pandas.DataFrame(file_list, columns=['FILE'])
-dataframe['HASH'] = dataframe.apply(hash_extract, commence=datetime.datetime.now(), axis=1)
+        public_graph = rdflib.Graph()
+        public_graph.add((statement_uri, rdflib.RDF.type, rdflib.URIRef('state://ontology/statement')))
+ 
+        state_literal = rdflib.Literal(fernet.encrypt(statement.encode()).decode())
+        public_graph.add((statement_uri, rdflib.URIRef('state://ontology/content'), state_literal))
 
-# copy to drive if file does not exist.
+        graph_path = pathlib.Path.cwd() / 'turtle' / statement_uuid[:2] / f'{statement_uuid}.ttl'
+        graph_path.parents[0].mkdir(exist_ok=True, parents=True)
+        public_graph.serialize(destination=str(graph_path), format='turtle')
 
-if out_dir.exists():
-    commence = datetime.datetime.now()
-    for x in range(len(dataframe)):
-        status = (datetime.datetime.now()-commence)/(x+1)
-        time_to_finish = (((status)*(len(dataframe)))+commence)
-        time_to_finish = time_to_finish.strftime("%Y-%m-%d %H:%M:%S")
-        print(f'copying: {x+1} of {len(dataframe)}; eta {time_to_finish}.')
+        key_dict[statement_uuid] = key
 
-        item = dataframe.iloc[x]
-        file = pathlib.Path(item['FILE'])
-        hash = item['HASH']
-        new_path = out_dir / 'object' / hash[:2] / f'{hash}{file.suffix}'
-        new_path.parents[0].mkdir(exist_ok=True, parents=True)
-        if not new_path.exists():
-            shutil.copyfile(file, new_path)
+    return key_dict
 
-# check files exist on target location and hash matches.
+def pull_predicate(graph, subj, pred):
 
-dataframe['SAFE'] = dataframe.apply(check_file, commence=datetime.datetime.now(), axis=1)
+    ''' Pull single statement by predicate from graph. '''
 
-# write manifest report out.
+    obj = [c for a,b,c in graph.triples((subj, pred, None))]
+    if len(obj) != 1:
+        raise Exception('Multiple statements should not be possible.')
 
-timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-manifest_path = pathlib.Path(out_dir / 'manifest' / f'{timestamp}.csv')
-manifest_path.parents[0].mkdir(exist_ok=True)
-dataframe.to_csv(manifest_path, index='False')
+    return obj
 
-print(len(dataframe))
-print(len(dataframe.HASH.unique()))
+def contribute_files(directory):
+
+    ''' Pass in a local directory containing files to contribute. '''
+
+    # convert incoming media to public triples.
+
+    incoming_files = [x for x in directory.rglob('*') if x.is_file() == True]
+
+    for f in tqdm.tqdm(incoming_files):
+
+        private_graph = file_graph(f)
+        private_keys = write_statements(private_graph)
+
+        # unencryption keys. keep safe.
+
+        keys_path = pathlib.Path.cwd() / 'private.json'
+        if not keys_path.exists():
+            with open(keys_path, 'w') as keys_out:
+                json.dump(private_keys, keys_out, indent=4)
+        else:
+            with open(keys_path) as keys_in:
+                keys_in = json.load(keys_in)
+            
+            with open(keys_path, 'w') as keys_out:
+                json.dump(keys_in | private_keys, keys_out, indent=4)
+
+def file_attributes(df, subj, pred):
+
+    ''' Pull specific attribute about an entity and return object. '''
+
+    filename = df.loc[df.subject.isin([subj]) & df.predicate.isin([pred])]
+    if len(filename) != 1:
+        raise Exception('Expected exactly one response.')
+
+    state_stub = filename.reset_index().at[0, 'source']
+    state_id = pathlib.Path(state_stub).name
+    res_triple = pull_triple(state_id)
+    for a,b,c in res_triple.triples((None, None, None)):         
+        return c
+
+def pull_triple(statement_id):
+
+    ''' Retrieve triple against provided state id. '''
+
+    private_keypath = pathlib.Path.cwd() / 'private.json'
+    if not private_keypath.exists():
+        raise Exception('Keys could not be found.')
+    else:
+        with open(private_keypath) as private_keys:
+            private_keys = json.load(private_keys)
+
+    statement_path = pathlib.Path.cwd() / 'turtle' / statement_id[:2] / f'{statement_id}.ttl'
+    public_statememt = rdflib.Graph().parse(statement_path)
+    for s,p,o in public_statememt:
+        if p == rdflib.URIRef('state://ontology/content'):
+            if pathlib.Path(s).name in private_keys:
+                key = private_keys[pathlib.Path(s).name]
+                fernet = Fernet(base64.urlsafe_b64encode(key.encode()))
+                private_statement = fernet.decrypt(o.encode()).decode()
+                private_graph = rdflib.Graph().parse(data=private_statement)
+
+    if len(private_graph) == 1:
+        return private_graph
+    else:
+        return Exception('Statement not retrieved.')
+
+def recreate_files(directory):
+
+    ''' Regenerate files from existing graph. '''
+
+    # build a map of the private graph. this is currently being performed on-the-fly, 
+    # but an alternate model would be that a local copy exists to be consulted.
+
+    map_df = pandas.DataFrame(columns=['source', 'subject', 'predicate', 'object'])
+    public_statements = [x.stem for x in (pathlib.Path.cwd() / 'turtle').rglob('*') if x.suffix == '.ttl']
+    for x in public_statements:
+
+        res_triple = pull_triple(x)
+
+        for a,b,c in res_triple.triples((None, None, None)):
+            if type(c) == type(rdflib.URIRef('')):
+                map_df.loc[len(map_df)] = [(x),(a), (b), (c)]
+            elif type(c) == type(rdflib.Literal('')):
+                map_df.loc[len(map_df)] = [(x),(a), (b), (rdflib.Literal(''))]
+            else:
+                raise Exception('Unknown object type.')
+
+    file_list = map_df.loc[map_df.object.isin([rdflib.URIRef('paul://ontology/file')])]
+    for f in file_list.subject.unique():
+        filename = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filename'))
+        filehash = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filehash'))
+        filedata = file_attributes(map_df, f, rdflib.URIRef('paul://ontology/filedata'))
+
+        without_path = pathlib.Path(filename).name
+        output_path = pathlib.Path.home() / 'recreated_media' / without_path
+        output_path.parents[0].mkdir(exist_ok=True)
+        with open(output_path, 'wb') as output:
+            output.write(base64.decodebytes(filedata.encode('utf-8')))
+
+        test = checksummer(output_path)
+        if test != str(filehash):
+            raise Exception('Hash does not match.')
+
+# contribute_files(pathlib.Path.home() / 'media') # add files to public graph.
+
+recreate_files(pathlib.Path.cwd() / 'recreate') # pull files from public graph.
+
