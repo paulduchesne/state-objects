@@ -73,9 +73,9 @@ def retrieve_files(directory):
         filehash = file_attributes(graph_map, f, rdflib.URIRef('paul://ontology/filehash'))
         filedata = file_attributes(graph_map, f, rdflib.URIRef('paul://ontology/filedata'))
 
-        without_path = pathlib.Path(filename).name
-        output_path = directory / without_path
-        output_path.parents[0].mkdir(exist_ok=True)
+        file_suffix = pathlib.Path(filename).suffix
+        output_path = directory / filehash[:2] / f'{filehash}{file_suffix}'
+        output_path.parents[0].mkdir(exist_ok=True, parents=True)
         with open(output_path, 'wb') as output:
             output.write(base64.decodebytes(filedata.encode('utf-8')))
 
@@ -83,10 +83,5 @@ def retrieve_files(directory):
         if test != str(filehash):
             raise Exception('Hash does not match.')
 
-# indicate directory of files to send to public graph.
-
-send_files(pathlib.Path.home() / 'media')
-
-# indicate directory to recreate files from the public graph.
-
-retrieve_files(pathlib.Path.home() / 'media_recreate')
+# send_files(pathlib.Path.home() / 'media') # send to public graph.
+# retrieve_files(pathlib.Path.home() / 'recreated') # recreate files from the public graph.
