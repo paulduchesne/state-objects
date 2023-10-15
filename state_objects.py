@@ -3,6 +3,7 @@ import hashlib
 import pathlib
 import rdflib
 import state
+import tqdm
 import uuid
 
 def checksummer(file_path):
@@ -58,9 +59,21 @@ def send_files(directory):
     ''' Send files into public graph. '''
 
     incoming_files = [x for x in directory.rglob('*') if x.is_file() == True]
-    for x in incoming_files:
-        private_graph = file_graph(x)
-        state.write_statements(private_graph)
+    for x in tqdm.tqdm(incoming_files):
+
+        file_hash = checksummer(x)
+
+        hash_list = list()
+        map_df = state.map_update()
+        map_df = map_df.loc[map_df.predicate.isin(['paul://ontology/filehash'])]
+        for y in map_df.source.unique():
+            thing = state.read_statement(y)
+            for s,p,o in thing.triples((None, None, None)):
+                hash_list.append(str(o))
+
+        if not file_hash in hash_list:
+            private_graph = file_graph(x)
+            state.write_statements(private_graph)
 
 def retrieve_files(directory):
 
@@ -83,5 +96,5 @@ def retrieve_files(directory):
         if test != str(filehash):
             raise Exception('Hash does not match.')
 
-# send_files(pathlib.Path.home() / 'media') # send to public graph.
+send_files(pathlib.Path.home() / 'media') # send to public graph.
 # retrieve_files(pathlib.Path.home() / 'recreated') # recreate files from the public graph.
