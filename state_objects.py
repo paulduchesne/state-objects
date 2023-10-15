@@ -79,12 +79,12 @@ def retrieve_files(directory):
 
     ''' Retrieve files from public graph. '''
 
-    graph_map = state.map_statements()
-    file_list = graph_map.loc[graph_map.object.isin([rdflib.URIRef('paul://ontology/file')])]
-    for f in file_list.subject.unique():
-        filename = file_attributes(graph_map, f, rdflib.URIRef('paul://ontology/filename'))
-        filehash = file_attributes(graph_map, f, rdflib.URIRef('paul://ontology/filehash'))
-        filedata = file_attributes(graph_map, f, rdflib.URIRef('paul://ontology/filedata'))
+    graph_map = state.map_update()
+    file_list = graph_map.loc[graph_map.object.isin([('paul://ontology/file')])]
+    for f in tqdm.tqdm(file_list.subject.unique()):
+        filename = file_attributes(graph_map, f, ('paul://ontology/filename'))
+        filehash = file_attributes(graph_map, f, ('paul://ontology/filehash'))
+        filedata = file_attributes(graph_map, f, ('paul://ontology/filedata'))
 
         file_suffix = pathlib.Path(filename).suffix
         output_path = directory / filehash[:2] / f'{filehash}{file_suffix}'
@@ -96,5 +96,5 @@ def retrieve_files(directory):
         if test != str(filehash):
             raise Exception('Hash does not match.')
 
-send_files(pathlib.Path.home() / 'media') # send to public graph.
-# retrieve_files(pathlib.Path.home() / 'recreated') # recreate files from the public graph.
+# send_files(pathlib.Path.home() / 'media') # send to public graph.
+retrieve_files(pathlib.Path.home() / 'recreated') # recreate files from the public graph.
